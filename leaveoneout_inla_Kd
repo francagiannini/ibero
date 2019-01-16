@@ -1,0 +1,110 @@
+####**Paralelization to make a leave one out validation**
+#source("https://bioconductor.org/biocLite.R")
+#biocLite() 
+library(BiocParallel)
+library(rlang)
+i=1
+
+inlakdpred <-function(i){
+  
+  library(devtools)
+  library(ggplot2)
+  library(INLA)
+  library(faraway)
+  library(gridExtra)
+  library(brinla)
+  library(ggplot2)
+  library(nlme)
+  library(geoR)
+  library(geoRglm)
+  library(sp)
+  library(mapview)
+  
+  
+  #Loading data
+  
+  setwd("C:/Users/franc/Dropbox/Franca/Doctorado/Mayaguez/Trabajo")
+  kdg1 <-read.table(file = "Kd_G.txt", header=TRUE, sep= "\t", dec = ",", na.strings = ".")
+  kdg <- kdg1[,1:19]
+  
+ 
+  #Centring scaling covariates
+  
+  Alcen <- kdg1$X.Al-mean(kdg1$X.Al)
+  AL2cen <- kdg1$AL2-mean(kdg1$AL2)
+  #Xscaled <-(kdg1$Xt-min(kdg1$Xt))/1000
+  #Yscaled <-(kdg1$Yt-min(kdg1$Yt))/1000
+  pH<-kdg1$pH
+  LIMO <-kdg1$LIMO
+  ARENA<-kdg1$ARENA
+  #PPanualcen <-kdg1$PPanual-mean(kdg1$PPanual)
+  LN_KdGlifo <- (kdg1$LN_KdGlifo)
+  Xt <- kdg1$Xt
+  Yt <- kdg1$Yt
+  
+  kdg <- as.data.frame((cbind(LN_KdGlifo, pH, ARENA, LIMO ,Alcen, AL2cen, Xt, Yt)))
+  
+  head(kdg)
+  
+  #structure residual table
+  
+  tablepred <- matrix(NA, nrow = nrow(kdg), ncol = 3)
+  colnames(tablepred)<- c("Observed","inlatps","inlaspde")
+  
+  train     <- kdg[-i, ]
+  train1    <- kdg[-i, ] 
+  test     <- kdg[i, ]
+  test1     <- kdg[i, ]
+  
+  iNA <- as.data.frame((cbind(NA, test$pH, test$ARENA, test$LIMO,
+                              test$Alcen, test$AL2cen, test$Xt, test$Yt)))
+  colnames(iNA)<- c("LN_KdGlifo", "pH", "ARENA", "LIMO" ,"Alcen", "AL2cen", "Xt", "Yt")
+  
+  testi <- as.data.frame(rbind(train,iNA))
+  
+  # coordinates(testi)<-~Xscaled+Yscaled
+  # coordinates(testi)<-~Xscaled+Yscaled
+  
+  loc.obs <- cbind(testi$Xt, testi$Yt)
+  
+  mesh <- inla.mesh.2d(loc.obs, cutoff = 200,
+                       max.edge = 20000)
+  
+  node <- mesh$idx$loc
+##tps  
+  tps <- bri.tps.prior(mesh)
+  
+  try({ 
+  formula_tps <- LN_KdGlifo ~ -1 + Alcen + AL2cen + ARENA + pH + LIMO + f(node, model = tps, diagonal = 1e-6) 
+  
+  inla_pred_tps <- inla(formula_tps, family = 'gaussian', data = testi
+                 ,control.predictor = list(link = 1, compute = TRUE)
+                 #,control.compute = list(cpo=TRUE, dic=TRUE, waic=TRUE)
+  )
+  
+  tablepred[i, "inlatps"] <- inla_pred_tps$summary.fitted.values$mean[92]
+      })
+  
+##spde  
+  spde <- inla.spde2.matern(mesh=mesh, alpha=1)
+  try({ 
+    formula_spde <-LN_KdGlifo ~ -1 + Alcen + AL2cen + ARENA + pH + LIMO + f(node, model = spde, diagonal = 1e-6) 
+    
+    inla_pred_spde <- inla(formula_spde, family = 'gaussian', data = testi
+                      ,control.predictor = list(link = 1, compute = TRUE)
+                      #,control.compute = list(cpo=TRUE, dic=TRUE, waic=TRUE)
+    )
+    
+    tablepred[i, "inlaspde"] <- (inla_pred_spde$summary.fitted.values$mean[92])
+    })
+  
+  try({
+    
+        tabla=tablepred[!apply(tablepred,1, function(X){all(is.na(X))}),]
+    return(tabla)
+    return(tablepred)
+  })
+  
+}
+
+results <-do.call("rbind",bplapply(1:92, inlakdpred, BPPARAM=SnowParam(workers=2, progressbar=TRUE, type="SOCK")))
