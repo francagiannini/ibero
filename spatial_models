@@ -1,0 +1,118 @@
+library(gstat)
+library(sp)
+library(automap)
+library(spdep)
+library(randomForest)
+library(gbm)
+library(dismo)
+library(spm)
+library(MASS)
+library(pls)
+library(nlme)
+
+setwd("C:/Users/franc/Dropbox/Franca/Doctorado/Kd/Glifo")
+
+mapa <-read.table(file = "Kd_G.txt", header=TRUE, sep= "\t", dec = ",", na.strings = ".")
+mapa <-mapa[,c(2:9,15)]
+mapa1 <- mapa
+dim(mapa)
+head(mapa)
+
+coordinates(mapa)<-~Xt+Yt
+#coordinates(mapa1)<-~Xt+Yt
+
+##########    linear regression by OLS    ##############
+  OLS = lm(LN_KdGlifo ~1+ X.Al + X.Al^2 + ARENA + pH + LIMO, data=mapa)#donde mapa va mapa
+  
+  OLS_pred = predict(OLS, newdata = mapa)
+    
+##########  linear regression by  REML with spatial correlation as random efect  ##############
+  REML <-gls(LN_KdGlifo ~ 1+ X.Al + X.Al^2 + ARENA + pH + LIMO
+             ,correlation=corExp(form=~as.numeric(as.character(Xt))+as.numeric(as.character(Yt))
+                                 ,metric="euclidean",nugget=FALSE) ,method="REML",na.action=na.omit,data=mapa)
+  
+  REML_pred = as.data.frame(predict(REML, newdata = mapa))
+
+##############  Ordinary Kriging without covariates ##################
+  VF_VUT_KO <- autofitVariogram(LN_KdGlifo~1,mapa, c("Sph", "Exp", "Gau"),cressie=T)
+  plot(VF_VUT_KO)
+  
+  OK_pred <- krige(LN_KdGlifo~ 1 , mapa, mapa, VF_VUT_KO$var_model,nmax=25)
+  OK_pred <- OK_pred$var1.pred
+  
+####### Regression Kriging  ######
+  RK_train<- lm(LN_KdGlifo~ 1+ X.Al + X.Al^2 + ARENA + pH + LIMO , data= mapa)
+  RK_pred_test<- as.data.frame(predict.lm(RK_train, mapa))
+  VF_VUT_KED <- autofitVariogram(RK_train$residuals~Xt+Yt,mapa, c("Sph", "Exp", "Gau"),cressie=T)
+  RK_res <- krige(residuals(RK_train)~1, mapa, newdata=mapa, model=VF_VUT_KED$var_model,nmax=25)
+  
+  RK_pred <- RK_pred_test[,1] + RK_res$var1.pred
+  
+###### Random Forest  ###############################
+  RF <- randomForest(formula = LN_KdGlifo ~ .-Xt-Yt, data = mapa, importance = F, na.action = na.omit)
+  
+  RF_pred <- predict(RF, newdata = mapa)
+
+####### Random Forest spatial Hibrid  ###############################
+  RF_KO_hibrid<- rfokpred(mapa1[, c("Xt","Yt")], mapa1[,-which(names(mapa1) %in% c("LN_KdGlifo","Xt","Yt"))],
+                           mapa1[, "LN_KdGlifo"], mapa1[, c("Xt","Yt")], mapa1[,-which(names(mapa1) %in% c("Xt","Yt","LN_KdGlifo"))],
+                           ntree = 500, nmax=25, vgm.args = (as.character(VF_VUT_KED$var_model$model[2])))
+  
+  RF_KO_hibrid_pred <- RF_KO_hibrid$Predictions
+  
+
+############### Generalized Boosted Regression ###################################
+  GBM <- gbm.step(data=mapa1, gbm.x = subset(names(mapa1),names(mapa1)!="LN_KdGlifo"& names(mapa1)!="Xt"& names(mapa1)!="Yt"), gbm.y = "LN_KdGlifo",
+                  family = "gaussian", tree.complexity = 5,learning.rate = 0.001, bag.fraction = 0.75, verbose=F)
+  
+  GBM_pred<- predict.gbm(GBM, mapa1, n.trees=GBM$gbm.call$best.trees, type="response")
+
+############# GBM-KO spatial Hibrid ######################
+  GBM_KO_hibrid<- gbmokpred(mapa1[, c("Xt","Yt")], mapa1[,-which(names(mapa1) %in% c("LN_KdGlifo","Xt","Yt"))],
+                             mapa1[, "LN_KdGlifo"], mapa1[, c("Xt","Yt")], mapa1[,-which(names(mapa1) %in% c("Xt","Yt","LN_KdGlifo"))]
+                             ,bag.fraction = 0.75, nmax=25, vgm.args = (as.character(VF_VUT_KED$var_model$model[2])),verbose=F)
+
+  
+  GBM_KO_hibrid_pred <- GBM_KO_hibrid$Predictions  
+  
+############# Partial Least Squared ######################
+  PLS <- plsr(formula=LN_KdGlifo ~ .-Xt-Yt,  data = mapa1, validation = "LO",jackknife = TRUE)
+  
+  PLS_pred<- predict(PLS, ncomp = ncol(mapa1)-3, newdata = mapa1)
+  colnames(PLS_pred) <- "PLS_pred"
+
+############# PLS Hibrid ######################
+  residuoPLS = mapa$LN_KdGlifo - PLS_pred
+  VF_PLS_res <- autofitVariogram(residuoPLS~Xt+Yt,mapa, c("Sph", "Exp", "Gau"),cressie=T)
+  RKPLS_res_pred <- krige(residuoPLS~1, mapa, newdata=mapa, model=VF_PLS_res$var_model,nmax=25)
+  
+  RKPLS_pred<- PLS_pred + RKPLS_res_pred$var1.pred
+  colnames(RKPLS_pred) <- "RKPLS_pred"
+############# GBM-KO Regression ######################
+  GBMpred_train <- predict.gbm(GBM, mapa1, n.trees=GBM$gbm.call$best.trees, type="response")
+  resGBM <-GBMpred_train -mapa$LN_KdGlifo
+  mapa$GBMres <-resGBM
+  vgm_GBM <- autofitVariogram(GBMres~1,mapa, c("Sph", "Exp", "Gau"),cressie=T)
+  pred_res_ok_gbm <- krige(GBMres~1, locations=mapa, newdata=mapa, model=vgm_GBM$var_model)
+  predGBM_test <- predict.gbm(GBM, mapa, n.trees=GBM$gbm.call$best.trees, type="response")
+  
+  RKGBM_pred <- predGBM_test + pred_res_ok_gbm$var1.pred
+
+  ############# RF Regression KO ######################
+  predRF_train<- predict(RF, newdata = mapa)
+  mapa$resRF <- mapa$LN_KdGlifo - predRF_train
+  VF_RF_res <- autofitVariogram(resRF~1,mapa, c("Sph", "Exp", "Gau"),cressie=T)
+  RKRF_pred <- krige(resRF~1, mapa, newdata=mapa, model=VF_RF_res$var_model,nmax=25)
+  predRF_test <- predict(RF, newdata = mapa)
+  RKRF_pred <- predRF_test + RKRF_pred$var1.pred
+  
+fitted_all <-as.data.frame(cbind(as.data.frame(mapa$LN_KdGlifo),as.data.frame(OLS_pred),as.data.frame(REML_pred), 
+                                  as.data.frame(OK_pred),as.data.frame(RK_pred),
+                                  as.data.frame(RF_pred),as.data.frame(RF_KO_hibrid_pred),
+                                  as.data.frame(GBM_pred),as.data.frame(GBM_KO_hibrid_pred),
+                                  as.data.frame(PLS_pred),as.data.frame(RKPLS_pred),
+                                  as.data.frame(RKGBM_pred), as.data.frame(RKRF_pred)))
+
+head(fitted_all)
+
+MSE <- as.data.frame(apply(fitted_all, 2 , function (x) {sqrt(mean((mapa$LN_KdGlifo-x)^2))/mean(mapa$LN_KdGlifo)*100}))
